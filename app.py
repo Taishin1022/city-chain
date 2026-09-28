@@ -175,6 +175,36 @@ def render_route_timeline(visited_cities, goal_city=None, finished=False):
 
     return '<div class="route-box">' + "".join(parts) + '</div>'
 
+
+@st.dialog("ルート確認")
+def confirm_tutorial(route):
+    """チュートリアル選択時のポップアップとスタート処理"""
+    st.markdown("以下の設定でゲームを開始しますか？")
+    st.markdown(f"### {route['title']}")
+    st.markdown(f"**ルート**: {route['desc']}")
+    st.markdown(f"**最大移動距離**: {route['max_distance']} km")
+    
+    st.write("")
+    if st.button("ゲームスタート", type="primary", use_container_width=True):
+        # 確実に見つけるため完全一致 (fuzzy=False) で都市データを取得
+        start_cands = search_city_candidates(cities, search_index, route["start"], fuzzy=False)
+        goal_cands = search_city_candidates(cities, search_index, route["goal"], fuzzy=False)
+        
+        if start_cands and goal_cands:
+            st.session_state.game_started = True
+            st.session_state.game_finished = False
+            st.session_state.game_result = None
+            st.session_state.start_city = start_cands[0]["city"]
+            st.session_state.goal_city = goal_cands[0]["city"]
+            st.session_state.current_city = start_cands[0]["city"]
+            st.session_state.visited_cities = [start_cands[0]["city"]]
+            st.session_state.total_distance = 0.0
+            st.session_state.max_distance = float(route["max_distance"])
+            st.session_state.last_move_distance = None
+            st.rerun()
+        else:
+            st.error("都市データの検索に失敗しました。")
+
 # =========================================================
 # Map
 # =========================================================
@@ -230,15 +260,14 @@ def create_map(visited_cities, start_city, goal_city, current_city):
 # =========================================================
 
 if not st.session_state.game_started:
-    st.markdown(
-        """
-        <div class="hero">
-            <div class="hero-title">The City Chain</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.divider()
+    # ヒーローセクションの余白調整用のdivを残しつつ、画像を表示します
+    st.markdown('<div class="hero">', unsafe_allow_html=True)
+    
+    # 画像を表示（widthでロゴの大きさを調整してください）
+    st.image("city-chain.png", width=350) 
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+    #st.divider()
 
     # ★ ここで画面を2分割（左1 : 右1 の比率）
     setup_left, setup_right = st.columns([1, 1], gap="large")
@@ -267,6 +296,8 @@ if not st.session_state.game_started:
 
         st.write("")
 
+        # app.py の該当部分（左半分の START / GOAL セクション）を以下のように書き換えてください
+
         # ---- START CITY ----
         st.write("**Start City**")
         with st.container(border=True):
@@ -279,13 +310,18 @@ if not st.session_state.game_started:
                 if start_candidates:
                     st.session_state.start_candidates = start_candidates
                     st.caption("📍 もしかして")
-                    start_labels = [city_display_name(item["city"]) for item in start_candidates]
-                    start_selected = st.selectbox(
-                        "START CITYを選択", range(len(start_candidates)),
-                        format_func=lambda i: start_labels[i], key="start_selection",
+                    
+                    # インデックスではなく geonameid をキーにして選択状態を確実にリセット
+                    start_options = {item["city"]["geonameid"]: item for item in start_candidates}
+                    
+                    start_selected_id = st.selectbox(
+                        "START CITYを選択", 
+                        options=list(start_options.keys()),
+                        format_func=lambda x: city_display_name(start_options[x]["city"]), 
+                        key="start_selection",
                         label_visibility="collapsed",
                     )
-                    st.session_state.start_selected = start_candidates[start_selected]["city"]
+                    st.session_state.start_selected = start_options[start_selected_id]["city"]
                 else:
                     st.warning("都市が見つかりません。")
                     st.session_state.start_selected = None
@@ -304,13 +340,18 @@ if not st.session_state.game_started:
                 if goal_candidates:
                     st.session_state.goal_candidates = goal_candidates
                     st.caption("📍 もしかして")
-                    goal_labels = [city_display_name(item["city"]) for item in goal_candidates]
-                    goal_selected = st.selectbox(
-                        "GOAL CITYを選択", range(len(goal_candidates)),
-                        format_func=lambda i: goal_labels[i], key="goal_selection",
+                    
+                    # こちらも geonameid ベースに修正
+                    goal_options = {item["city"]["geonameid"]: item for item in goal_candidates}
+                    
+                    goal_selected_id = st.selectbox(
+                        "GOAL CITYを選択", 
+                        options=list(goal_options.keys()),
+                        format_func=lambda x: city_display_name(goal_options[x]["city"]), 
+                        key="goal_selection",
                         label_visibility="collapsed",
                     )
-                    st.session_state.goal_selected = goal_candidates[goal_selected]["city"]
+                    st.session_state.goal_selected = goal_options[goal_selected_id]["city"]
                 else:
                     st.warning("都市が見つかりません。")
                     st.session_state.goal_selected = None
@@ -350,20 +391,53 @@ if not st.session_state.game_started:
             st.caption("STARTとGOALを入力すると、該当する都市の候補が表示されます。両方選択するとSTARTボタンが有効になります。")
 
     # -------------------------------
-    # 右半分：ユーザー指定の画像 (PNG)
+    # 右半分：チュートリアルルート ＆ 画像
     # -------------------------------
     with setup_right:
-        from pathlib import Path
+        st.markdown('<div class="section-label">TUTORIAL ROUTES</div>', unsafe_allow_html=True)
+        st.caption("クリックですぐにゲームを開始できるおすすめルートです。")
+        
+        # チュートリアル用のルート定義
+        TUTORIAL_ROUTES = [
+            {"title": "🔰 短距離", "desc": "東京 - 大阪", "start": "Tokyo", "goal": "Osaka", "max_distance": 100.0},
+            {"title": "✈️ 中距離", "desc": "ロンドン - イスタンブル", "start": "London", "goal": "Istanbul", "max_distance": 600.0},
+            {"title": "🌎 長距離", "desc": "ニューヨーク - ロサンゼルス", "start": "New York", "goal": "Los Angeles", "max_distance": 1000.0},
+            {"title": "🚀 超長距離", "desc": "東京 - ロンドン", "start": "Tokyo", "goal": "London", "max_distance": 3000.0},
+        ]
+        
+        # 2x2のグリッドで配置
+        for i in range(0, len(TUTORIAL_ROUTES), 2):
+            c1, c2 = st.columns(2)
+            # 左側の列
+            with c1:
+                route = TUTORIAL_ROUTES[i]
+                with st.container(border=True):
+                    st.markdown(f"**{route['title']}**")
+                    st.markdown(f"<div style='font-size:0.85rem; color:#666;'>{route['desc']}<br>MAX: {route['max_distance']} km</div>", unsafe_allow_html=True)
+                    st.write("")
+                    if st.button("選択", key=f"tut_{i}", use_container_width=True):
+                        confirm_tutorial(route)
+            
+            # 右側の列
+            with c2:
+                if i + 1 < len(TUTORIAL_ROUTES):
+                    route = TUTORIAL_ROUTES[i+1]
+                    with st.container(border=True):
+                        st.markdown(f"**{route['title']}**")
+                        st.markdown(f"<div style='font-size:0.85rem; color:#666;'>{route['desc']}<br>MAX: {route['max_distance']} km</div>", unsafe_allow_html=True)
+                        st.write("")
+                        if st.button("選択", key=f"tut_{i+1}", use_container_width=True):
+                            confirm_tutorial(route)
 
+        st.write("")
+        
+        # ヒーロー画像（邪魔にならないよう少し小さめにして下部に配置）
+        from pathlib import Path
         img_path = Path(__file__).parent / "hero-image.jpeg"
         if img_path.exists():
-            # [左の余白, 画像の幅, 右の余白] の比率で分割
             pad_left, img_col, pad_right = st.columns([0.15, 0.7, 0.15])
             with img_col:
-                st.markdown("<div style='margin-top: 60px;'></div>", unsafe_allow_html=True)
                 st.image(str(img_path), use_container_width=True)
-        else:
-            st.warning(f"画像が見つかりません: {img_path}")
 
     st.divider()
     st.caption(f"都市データ：{len(cities):,} cities")
@@ -389,7 +463,8 @@ ideal_distance = calculate_distance(start_city, goal_city)
 
 h_col1, h_col2 = st.columns([9, 1])
 with h_col1:
-    st.markdown('<div class="game-title">The City Chain</div>', unsafe_allow_html=True)
+    # テキストの代わりに画像を表示（widthはヘッダーに合わせて少し小さめに）
+    st.image("city-chain.png", width=250)
 with h_col2:
     with st.popover("Setting", use_container_width=True):
         if st.button("🔄 Restart", use_container_width=True):
@@ -408,12 +483,15 @@ st.divider()
 if st.session_state.game_finished:
     result = st.session_state.game_result
 
-    r_left, r_right = st.columns([0.82, 1.7], gap="large")
+
+# 左端に「spacer」として 0.1 の余白カラムを追加します
+    # ※元の比率が [0.82, 1.7] だった場合は [0.1, 0.82, 1.7] にしてください
+    r_left, r_right = st.columns([1, 1], gap="large")
 
     with r_left:
         if result == "CLEAR":
             st.markdown("### 📊 Result")
-
+            
             st.markdown('<div class="section-label">GAME MODE</div>', unsafe_allow_html=True)
             st.markdown(
                 f'<div class="mode-value" style="margin-bottom: 1.5rem;">{st.session_state.game_mode}</div>',
@@ -430,7 +508,7 @@ if st.session_state.game_finished:
             else:
                 rank = "C (Bad)"
 
-            eff_col, rank_col = st.columns([1, 1])
+            eff_col, spacer, rank_col = st.columns([1, 0.5, 1])
             with eff_col:
                 st.markdown(
                     f"""
@@ -446,11 +524,31 @@ if st.session_state.game_finished:
 
             st.write("")
             diff = total_distance - ideal_distance
-            s1, s2, s3 = st.columns(3)
-            s1.metric("TOTAL DISTANCE", f"{total_distance:.0f} km")
-            s2.metric("IDEAL DISTANCE", f"{ideal_distance:.0f} km")
-            s3.metric("DIFFERENCE", f"{diff:+.0f} km")
-
+            spacer, s1, s2, s3 = st.columns([0.1,1,1,1])
+            with s1:
+                st.markdown(
+                    f"""
+                    <div class="section-label">TOTAL DISTANCE</div>
+                    <div style="font-size: 1.8rem; font-weight: 700; color: #333; margin-top: -0.2rem;">{total_distance:.0f} km</div>
+                    """, 
+                    unsafe_allow_html=True
+                )
+            with s2:
+                st.markdown(
+                    f"""
+                    <div class="section-label">IDEAL DISTANCE</div>
+                    <div style="font-size: 1.8rem; font-weight: 700; color: #333; margin-top: -0.2rem;">{ideal_distance:.0f} km</div>
+                    """, 
+                    unsafe_allow_html=True
+                )
+            with s3:
+                st.markdown(
+                    f"""
+                    <div class="section-label">DIFFERENCE</div>
+                    <div style="font-size: 1.8rem; font-weight: 700; color: #333; margin-top: -0.2rem;">{diff:+.0f} km</div>
+                    """, 
+                    unsafe_allow_html=True
+                )
             st.write("")
             b1, b2 = st.columns(2)
             with b1:
@@ -496,7 +594,7 @@ with left:
     # ---- WHERE TO NEXT ----
     st.markdown('<div class="section-label">WHERE TO NEXT?</div>', unsafe_allow_html=True)
     st.caption(f"最大 {max_distance:.0f} km 以内の都市へ移動できます。")
-    next_query = st.text_input("次の都市", placeholder="例：Kyoto / 京都", label_visibility="collapsed", key="next_city_input")
+    next_query = st.text_input("次の都市", placeholder="例：Yokohama / 横浜", label_visibility="collapsed", key="next_city_input")
 
     if next_query.strip():
         exact_candidates = search_city_candidates(
@@ -524,13 +622,24 @@ with left:
                         st.session_state.game_finished = True
                         st.session_state.game_result = "CLEAR"
                     st.rerun()
+            # app.py の MAIN GAME AREA 内、「同名の都市があります」の分岐部分も同様に書き換えます
+
             else:
                 st.info("同名の都市があります。移動先を選択してください。")
-                labels = [f"{city_display_name(item['city'])} — {item['distance']:.1f} km" for item in exact_candidates]
-                selected_index = st.selectbox("移動先", range(len(exact_candidates)), format_func=lambda i: labels[i], key="exact_city_selection")
-                selected_city = exact_candidates[selected_index]["city"]
+                
+                # インデックスではなく geonameid ベースに修正
+                exact_options = {item["city"]["geonameid"]: item for item in exact_candidates}
+                
+                selected_id = st.selectbox(
+                    "移動先", 
+                    options=list(exact_options.keys()), 
+                    format_func=lambda x: f"{city_display_name(exact_options[x]['city'])} — {exact_options[x]['distance']:.1f} km", 
+                    key="exact_city_selection"
+                )
+                selected_city = exact_options[selected_id]["city"]
 
                 if st.button("MOVE", use_container_width=True, type="primary", key="exact_multiple_move"):
+                    # 以降の処理は既存のまま
                     new_current, new_total, new_visited, move_distance = make_move(current_city, selected_city, total_distance, visited_cities)
                     st.session_state.current_city = new_current
                     st.session_state.total_distance = new_total
@@ -579,7 +688,7 @@ with left:
 
 with right:
     # ---- STATS ROW ----
-    s1, spacer, s2, s3 = st.columns([1, 0.5, 1, 1])
+    s1, spacer, s2, s3 = st.columns([1, 0.4, 1, 1])
     with s1:
         st.markdown(
             f"""
@@ -590,9 +699,21 @@ with right:
             """, unsafe_allow_html=True,
         )
     with s2:
-        st.metric("Total Distance", f"{total_distance:.1f} km")
+        st.markdown(
+            f"""
+            <div class="section-label">TOTAL DISTANCE</div>
+            <div style="font-size: 1.8rem; font-weight: 700; color: #333; margin-top: -0.2rem;">{total_distance:.1f} km</div>
+            """, 
+            unsafe_allow_html=True
+        )
     with s3:
-        st.metric("Distance to Goal", f"{current_distance_to_goal:.1f} km")
+        st.markdown(
+            f"""
+            <div class="section-label">DISTANCE TO GOAL</div>
+            <div style="font-size: 1.8rem; font-weight: 700; color: #333; margin-top: -0.2rem;">{current_distance_to_goal:.1f} km</div>
+            """, 
+            unsafe_allow_html=True
+        )
 
     st.write("")
 
