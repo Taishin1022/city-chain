@@ -703,33 +703,57 @@ if st.session_state.game_finished:
 # =========================================================
 # MAIN GAME AREA
 # =========================================================
+from streamlit_javascript import st_javascript
 
 current_distance_to_goal = calculate_distance(current_city, goal_city)
 
-left, right = st.columns([0.82, 1.7], gap="large")
+# ---- 画面幅を取得してスマホかどうかを判定 ----
+window_width = st_javascript("window.innerWidth")
+# 初回ロード時などで値が取得できない場合(0)はPCレイアウトをデフォルトにする
+is_mobile = isinstance(window_width, int) and 0 < window_width < 768
 
-with left:
-    # ---- GAME MODE ----
-    st.markdown('<div class="section-label">GAME MODE</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="mode-value">{st.session_state.game_mode}</div>', unsafe_allow_html=True)
-    st.markdown('<div class="mode-tagline">最短距離でGoalを目指せ！</div>', unsafe_allow_html=True)
+# ---- 各UIパーツの描画処理を関数として定義 ----
 
-    # ---- ROUTE HISTORY (timeline) ----
-    st.markdown(
-        render_route_timeline(visited_cities, goal_city, finished=False),
-        unsafe_allow_html=True,
-    )
+def render_map():
+    # スマホの場合は地図の高さを少し抑える
+    map_height = 400 if is_mobile else 560
+    game_map = create_map(visited_cities, start_city, goal_city, current_city, max_distance)
+    st_folium(game_map, width=None, height=map_height, returned_objects=[])
 
-    st.write("")
+def render_stats():
+    s1, spacer, s2, s3 = st.columns([1, 0.2, 1, 1])
+    with s1:
+        st.markdown(
+            f"""
+            <div class="score-card">
+                <div class="score-label">ROUTE EFFICIENCY</div>
+                <div class="score-value">{route_efficiency:.1f}%</div>
+            </div>
+            """, unsafe_allow_html=True,
+        )
+    with s2:
+        st.markdown(
+            f"""
+            <div class="section-label">TOTAL DISTANCE</div>
+            <div style="font-size: 1.8rem; font-weight: 700; color: #333; margin-top: -0.2rem;">{total_distance:.1f} km</div>
+            """, 
+            unsafe_allow_html=True
+        )
+    with s3:
+        st.markdown(
+            f"""
+            <div class="section-label">DISTANCE TO GOAL</div>
+            <div style="font-size: 1.8rem; font-weight: 700; color: #333; margin-top: -0.2rem;">{current_distance_to_goal:.1f} km</div>
+            """, 
+            unsafe_allow_html=True
+        )
 
-    ## ---- WHERE TO NEXT ----
+def render_controls():
     st.markdown('<div class="section-label">WHERE TO NEXT?</div>', unsafe_allow_html=True)
     
-    # 距離に応じてGoogle Mapsのズームレベルを最適化（距離が大きいほど広域を表示）
     zoom_level = max(3, int(14 - math.log2(max_distance)))
     gmaps_url = f"https://www.google.com/maps/@{current_city['latitude']},{current_city['longitude']},{zoom_level}z"
 
-    # キャプションとヒントボタンを横並びに配置
     col_cap, col_hint = st.columns([7, 3], vertical_alignment="bottom")
     with col_cap:
         st.caption(f"最大 {max_distance:.0f} km 以内の都市へ移動できます。")
@@ -764,14 +788,10 @@ with left:
                         st.session_state.game_finished = True
                         st.session_state.game_result = "CLEAR"
                     st.rerun()
-            # app.py の MAIN GAME AREA 内、「同名の都市があります」の分岐部分も同様に書き換えます
 
             else:
                 st.info("同名の都市があります。移動先を選択してください。")
-                
-                # インデックスではなく geonameid ベースに修正
                 exact_options = {item["city"]["geonameid"]: item for item in exact_candidates}
-                
                 selected_id = st.selectbox(
                     "移動先", 
                     options=list(exact_options.keys()), 
@@ -781,7 +801,6 @@ with left:
                 selected_city = exact_options[selected_id]["city"]
 
                 if st.button("MOVE", use_container_width=True, type="primary", key="exact_multiple_move"):
-                    # 以降の処理は既存のまま
                     new_current, new_total, new_visited, move_distance = make_move(current_city, selected_city, total_distance, visited_cities)
                     st.session_state.current_city = new_current
                     st.session_state.total_distance = new_total
@@ -828,37 +847,37 @@ with left:
     if st.session_state.last_move_distance is not None:
         st.success(f"移動距離：{st.session_state.last_move_distance:.1f} km")
 
-with right:
-    # ---- STATS ROW ----
-    s1, spacer, s2, s3 = st.columns([1, 0.4, 1, 1])
-    with s1:
-        st.markdown(
-            f"""
-            <div class="score-card">
-                <div class="score-label">ROUTE EFFICIENCY</div>
-                <div class="score-value">{route_efficiency:.1f}%</div>
-            </div>
-            """, unsafe_allow_html=True,
-        )
-    with s2:
-        st.markdown(
-            f"""
-            <div class="section-label">TOTAL DISTANCE</div>
-            <div style="font-size: 1.8rem; font-weight: 700; color: #333; margin-top: -0.2rem;">{total_distance:.1f} km</div>
-            """, 
-            unsafe_allow_html=True
-        )
-    with s3:
-        st.markdown(
-            f"""
-            <div class="section-label">DISTANCE TO GOAL</div>
-            <div style="font-size: 1.8rem; font-weight: 700; color: #333; margin-top: -0.2rem;">{current_distance_to_goal:.1f} km</div>
-            """, 
-            unsafe_allow_html=True
-        )
 
+# ---- 実際の画面描画（スマホとPCで分岐） ----
+
+if is_mobile:
+    # スマホ向けレイアウト（縦並び：地図 → ステータス → 入力と履歴）
+    st.markdown('<div class="section-label">GAME MODE</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="mode-value">{st.session_state.game_mode}</div>', unsafe_allow_html=True)
+    st.markdown('<div class="mode-tagline">最短距離でGoalを目指せ！</div>', unsafe_allow_html=True)
+    
+    render_map()
     st.write("")
+    render_stats()
+    st.write("")
+    render_controls()
+    st.write("")
+    st.markdown(render_route_timeline(visited_cities, goal_city, finished=False), unsafe_allow_html=True)
 
-    # ---- MAP ----
-    game_map = create_map(visited_cities, start_city, goal_city, current_city, max_distance)
-    st_folium(game_map, width=None, height=560, returned_objects=[])
+else:
+    # PC向けレイアウト（左右分割）
+    left, right = st.columns([0.82, 1.7], gap="large")
+    
+    with left:
+        st.markdown('<div class="section-label">GAME MODE</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="mode-value">{st.session_state.game_mode}</div>', unsafe_allow_html=True)
+        st.markdown('<div class="mode-tagline">最短距離でGoalを目指せ！</div>', unsafe_allow_html=True)
+        
+        st.markdown(render_route_timeline(visited_cities, goal_city, finished=False), unsafe_allow_html=True)
+        st.write("")
+        render_controls()
+
+    with right:
+        render_stats()
+        st.write("")
+        render_map()
