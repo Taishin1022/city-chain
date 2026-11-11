@@ -620,7 +620,7 @@ if st.session_state.game_finished:
 
     with r_left:
         if result == "CLEAR":
-            st.markdown("Result")
+            #st.markdown("Result")
             
             #st.markdown('<div class="section-label">GAME MODE</div>', unsafe_allow_html=True)
             # st.markdown(
@@ -690,9 +690,10 @@ if st.session_state.game_finished:
                     play_again()
                     st.rerun()
 
-    with r_right:
         game_map = create_map(visited_cities, start_city, goal_city, current_city, max_distance)
         st_folium(game_map, width=None, height=420, returned_objects=[])
+
+    with r_right:
         st.write("")
         st.markdown('<div class="section-label">ROUTE HISTORY</div>', unsafe_allow_html=True)
         st.markdown(render_route_timeline(visited_cities, finished=True), unsafe_allow_html=True)
