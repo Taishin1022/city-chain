@@ -1,4 +1,6 @@
+import random 
 import streamlit as st
+import math 
 import folium
 
 from streamlit_folium import st_folium
@@ -12,6 +14,7 @@ from search import (
     build_search_index,
     search_city_candidates,
     city_display_name,
+    get_city_priority, # 追加
 )
 
 from game import (
@@ -98,6 +101,15 @@ def get_search_system(cities):
 cities = get_cities()
 search_index, tree = get_search_system(cities)
 
+@st.cache_data(show_spinner="ランダムモード用の大都市データを準備中...")
+def get_major_city_indices(_cities):
+    """
+    ランダムスタートで無名すぎる都市が選ばれないよう、
+    優先度（人口や首都などの属性）が高い上位300都市のインデックスを抽出します。
+    """
+    priorities = _cities.apply(get_city_priority, axis=1)
+    return priorities.nlargest(300).index
+    
 # =========================================================
 # Session State & Helper Functions
 # =========================================================
@@ -205,121 +217,266 @@ def confirm_tutorial(route):
         else:
             st.error("都市データの検索に失敗しました。")
 
+
 # =========================================================
 # Map
 # =========================================================
 
-def create_map(visited_cities, start_city, goal_city, current_city):
+def create_map(visited_cities, start_city, goal_city, current_city, max_distance):
+    MAPTILER_API_KEY = "bdBZZiwFtIdbj11AY3CE"
+    tiles_url = f"https://api.maptiler.com/maps/aquarelle-v4/{{z}}/{{x}}/{{y}}.png?key={MAPTILER_API_KEY}"
+    
+    # 座標補正ヘルパー関数：基準となる経度(ref_lon)から最短距離になるように目的の経度(target_lon)を補正する
+    def get_corrected_lon(target_lon, ref_lon):
+        diff = (target_lon - ref_lon + 180) % 360 - 180
+        return ref_lon + diff
+
+    # スタート地点を基準に、ルート全体の連続した経度を計算する
+    base_lon = float(start_city["longitude"])
+    corrected_route_points = []
+    prev_lon = base_lon
+    
+    for city in visited_cities:
+        lat = float(city["latitude"])
+        lon = get_corrected_lon(float(city["longitude"]), prev_lon)
+        corrected_route_points.append([lat, lon])
+        prev_lon = lon
+
+    # 現在地（リストの最後）の補正済み経度
+    current_corrected_lon = corrected_route_points[-1][1] if corrected_route_points else base_lon
+
+    # 地図の初期化（中心を補正済みの現在地にする）
     m = folium.Map(
-        location=[float(current_city["latitude"]), float(current_city["longitude"])],
+        location=[float(current_city["latitude"]), current_corrected_lon],
         zoom_start=6,
-        tiles="Esri.WorldImagery",
+        tiles=tiles_url,
+        attr='&copy; <a href="https://www.maptiler.com/copyright/" target="_blank">MapTiler</a> &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap contributors</a>'
     )
 
-    if len(visited_cities) >= 2:
-        route_points = [[float(c["latitude"]), float(c["longitude"])] for c in visited_cities]
-        folium.PolyLine(route_points, weight=4, opacity=0.8, tooltip="移動ルート").add_to(m)
+    # 現在地の円（移動可能領域）
+    folium.Circle(
+        location=[float(current_city["latitude"]), current_corrected_lon],
+        radius=max_distance * 1000, 
+        color="orange", weight=2, fill=True, fill_color="orange", fill_opacity=0.3,
+        tooltip=f"移動可能エリア (MAX {max_distance:.0f} km)"
+    ).add_to(m)
 
+    # 補正済みの直線ルートを描画
+    if len(corrected_route_points) >= 2:
+        folium.PolyLine(corrected_route_points, weight=4, opacity=0.8, tooltip="移動ルート").add_to(m)
+
+    # STARTマーカー
     folium.Marker(
-        [float(start_city["latitude"]), float(start_city["longitude"])],
-        tooltip="START",
-        popup=f"START<br>{start_city['name']}",
+        [float(start_city["latitude"]), base_lon],
+        tooltip="START", popup=f"START<br>{start_city['name']}",
         icon=folium.Icon(color="orange", icon="play"),
     ).add_to(m)
 
+    # ★ GOALマーカーの補正（現在地を基準に、日付変更線の向こう側へ配置する）
+    g_lat = float(goal_city["latitude"])
+    g_lon = get_corrected_lon(float(goal_city["longitude"]), current_corrected_lon)
+    
     folium.Marker(
-        [float(goal_city["latitude"]), float(goal_city["longitude"])],
-        tooltip="GOAL",
-        popup=f"GOAL<br>{goal_city['name']}",
+        [g_lat, g_lon],
+        tooltip="GOAL", popup=f"GOAL<br>{goal_city['name']}",
         icon=folium.Icon(color="red", icon="flag"),
     ).add_to(m)
 
-    for i, city in enumerate(visited_cities):
+    # 中継都市の小マーカー
+    for i, (city, corrected_pos) in enumerate(zip(visited_cities, corrected_route_points)):
         if city["geonameid"] == start_city["geonameid"] or city["geonameid"] == current_city["geonameid"]:
             continue
         folium.CircleMarker(
-            [float(city["latitude"]), float(city["longitude"])],
+            corrected_pos,
             radius=5, tooltip=f"{i + 1}. {city['name']}", fill=True,
         ).add_to(m)
 
+    # CURRENTマーカー
     folium.Marker(
-        [float(current_city["latitude"]), float(current_city["longitude"])],
-        tooltip="CURRENT",
-        popup=f"CURRENT<br>{current_city['name']}",
+        [float(current_city["latitude"]), current_corrected_lon],
+        tooltip="CURRENT", popup=f"CURRENT<br>{current_city['name']}",
         icon=folium.Icon(color="green", icon="location-arrow"),
     ).add_to(m)
 
-    points = [[float(c["latitude"]), float(c["longitude"])] for c in list(visited_cities) + [start_city, goal_city, current_city]]
-    if len(points) >= 2:
-        m.fit_bounds(points)
+    # カメラのズーム枠を、補正済みのルートとゴールに合わせて最適化
+    bounds_points = corrected_route_points.copy()
+    bounds_points.append([g_lat, g_lon])
+    if len(bounds_points) >= 2:
+        m.fit_bounds(bounds_points)
 
     return m
+
 
 # =========================================================
 # SETUP SCREEN
 # =========================================================
 
+# ---------------------------------------------------------
+# ランダムモード用の地域マッピング
+# ---------------------------------------------------------
+REGION_MAP = {
+    "指定なし": None,
+    "アジア": ["JP", "CN", "KR", "KP", "TW", "HK", "IN", "ID", "TH", "VN", "MY", "PH", "SG"],
+    "北アメリカ": ["US", "CA", "MX", "CU", "JM", "PA", "CR"],
+    "ヨーロッパ": ["GB", "FR", "DE", "IT", "ES", "NL", "BE", "CH", "AT", "SE", "NO", "DK", "FI", "PL", "UA", "IE", "PT", "GR"],
+    "南アメリカ": ["BR", "AR", "CO", "CL", "PE", "VE", "EC", "UY"],
+    "オセアニア": ["AU", "NZ", "PG"],
+    "アフリカ": ["ZA", "EG", "NG", "KE", "MA", "DZ", "ET", "GH", "TZ"],
+    "中東": ["AE", "SA", "IL", "TR", "IR", "IQ", "QA", "KW", "OM", "SY", "LB", "JO"]
+}
+
+#モード選択(rondon, freeplay, turtorial)
 if not st.session_state.game_started:
-    # ヒーローセクションの余白調整用のdivを残しつつ、画像を表示します
     st.markdown('<div class="hero">', unsafe_allow_html=True)
-    
-    # 画像を表示（widthでロゴの大きさを調整してください）
+    # ロゴ画像を表示
     st.image("city-chain.png", width=350) 
-    
     st.markdown('</div>', unsafe_allow_html=True)
-    #st.divider()
 
-    # ★ ここで画面を2分割（左1 : 右1 の比率）
-    setup_left, setup_right = st.columns([1, 1], gap="large")
+    # モード切り替えをサブ機能に
+    st.markdown(
+        '<div class="section-label">GAME MODE'
+        '<span class="help-tip" title="現在はDistanceモードのみ実装されています。">?</span></div>',
+        unsafe_allow_html=True,
+    )
+    #ゲームモード（Time, Distance, Visit）は廃止（1つのモードに統合）
+    # mc1, mc2, mc3 = st.columns(3)
+    # with mc1:
+    #     st.button("Time", use_container_width=True, disabled=True, key="mode_time_btn")
+    # with mc2:
+    #     with st.container(key="mode_distance_wrap"):
+    #         st.button("Distance", use_container_width=True, type="primary", key="mode_distance_btn")
+    # with mc3:
+    #     st.button("Visit", use_container_width=True, disabled=True, key="mode_visit_btn")
+    # st.write("")
 
+    # ★ メインシステムとサブシステムをタブで分割
+    tab_random, tab_custom, tab_tutorial = st.tabs([
+        "Rondam Route", 
+        "Free Play", 
+        "Tutorial"
+    ])
+
+  # -------------------------------
+    # タブ1：ランダムスタート（メイン）
     # -------------------------------
-    # 左半分：既存の入力フォームとボタン
-    # -------------------------------
-    with setup_left:
-        # ---- GAME MODE ----
-        st.markdown(
-            '<div class="section-label">GAME MODE'
-            '<span class="help-tip" title="現在はDistanceモードのみ実装されています。'
-            'Time・Visitモードは今後追加予定です。">?</span></div>',
-            unsafe_allow_html=True,
-        )
-        mc1, mc2, mc3 = st.columns(3)
-        with mc1:
-            st.button("Time", use_container_width=True, disabled=True, key="mode_time_btn",
-                      help="近日公開予定です（現在は未実装）")
-        with mc2:
-            with st.container(key="mode_distance_wrap"):
-                st.button("Distance", use_container_width=True, type="primary", key="mode_distance_btn")
-        with mc3:
-            st.button("Visit", use_container_width=True, disabled=True, key="mode_visit_btn",
-                      help="近日公開予定です（現在は未実装）")
-
+    with tab_random:
+        st.markdown("Rondam Route")
+        st.write("世界中の主要都市からランダムに選ばれたスタートとゴールを繋ぎましょう！")
+        
+        # CSVデータから存在する国名(country)のリストを自動抽出してソート
+        available_countries = [c for c in cities["country"].unique() if isinstance(c, str) and c.strip()]
+        available_countries.sort()
+        country_options = ["指定なし"] + available_countries
+        
+        # 難易度・地域・国を3カラムで配置
+        r_col1, r_col2, r_col3 = st.columns(3)
+        with r_col1:
+            difficulty = st.selectbox("難易度", ["Easy (簡単)", "Normal (普通)", "Hard (難しい)"], index=1)
+        with r_col2:
+            region_sel = st.selectbox("地域選択", list(REGION_MAP.keys()), index=0)
+        with r_col3:
+            country_sel = st.selectbox("国選択", country_options, index=0)
+        
         st.write("")
+        if st.button("START", type="primary", use_container_width=True, key="btn_random_start"):
+            major_indices = get_major_city_indices(cities)
+            filtered_cities = cities.loc[major_indices]
+            
+            # 1. 地域で絞り込み (country_codeで判定)
+            if region_sel != "指定なし":
+                filtered_cities = filtered_cities[filtered_cities["country_code"].isin(REGION_MAP[region_sel])]
+                
+            # 2. 国で絞り込み (自動抽出したcountryカラムで判定)
+            if country_sel != "指定なし":
+                filtered_cities = filtered_cities[filtered_cities["country"] == country_sel]
+            
+            # 条件に合う都市が少なすぎる場合のエラーチェック
+            if len(filtered_cities) < 2:
+                st.error("⚠️ 地域または国のどちらか一方を選択してください。")
+            # 条件に合う都市が少なすぎる場合のエラーチェック
+            if len(filtered_cities) < 2:
+                st.error("⚠️ 地域または国のどちらか一方を選択してください。")
+            else:
+                max_attempts = 100
+                valid_pair_found = False
+                
+                # 25km以上離れたペアが見つかるまで最大100回再抽選する
+                for _ in range(max_attempts):
+                    # 絞り込んだリストからランダムに2つのインデックスを取得
+                    rand_indices = random.sample(list(filtered_cities.index), 2)
+                    
+                    start_city = filtered_cities.loc[rand_indices[0]]
+                    goal_city = filtered_cities.loc[rand_indices[1]]
+                    
+                    # スタートとゴールの直線距離を計算
+                    dist = calculate_distance(start_city, goal_city)
+                    
+                    # 基本条件：距離が50km以上
+                    is_valid = (dist >= 25.0)
+                    
+                    # 追加条件：地域指定のみの場合、異なる国どうしのペアにする
+                    if region_sel != "指定なし" and country_sel == "指定なし":
+                        if start_city["country_code"] == goal_city["country_code"]:
+                            is_valid = False
 
-        # app.py の該当部分（左半分の START / GOAL セクション）を以下のように書き換えてください
+                    # 追加条件：地域指定と国指定がどちらも指定されていない場合、異なる国どうしのペアにする
+                    if region_sel == "指定なし" and country_sel == "指定なし":
+                        if start_city["country_code"] == goal_city["country_code"]:
+                            is_valid = False
+                            
+                    if is_valid:
+                        valid_pair_found = True
+                        break
+                
+                if not valid_pair_found:
+                    st.error("⚠️ 指定された条件内で、50km以上離れた都市のペアが見つかりませんでした。条件を広げてください。")
+                else:
+                    # 距離と難易度に応じた MAX DISTANCE の算出
+                    if "Easy" in difficulty:
+                        calculated_max = max(100.0, dist / 2.5)
+                    elif "Normal" in difficulty:
+                        calculated_max = max(50.0, dist / 3.5)
+                    else:
+                        calculated_max = max(30.0, dist / 8.0)
+                    
+                    # 10km単位に丸める
+                    calculated_max = round(calculated_max / 10.0) * 10.0
+                    if calculated_max < 10.0:
+                        calculated_max = 10.0
 
+                    st.session_state.game_started = True
+                    st.session_state.game_finished = False
+                    st.session_state.game_result = None
+                    st.session_state.start_city = start_city
+                    st.session_state.goal_city = goal_city
+                    st.session_state.current_city = start_city
+                    st.session_state.visited_cities = [start_city]
+                    st.session_state.total_distance = 0.0
+                    st.session_state.max_distance = float(calculated_max)
+                    st.session_state.last_move_distance = None
+                    st.rerun()
+
+    # -------------------------------
+    # タブ2：Free Play（サブ）
+    # -------------------------------
+    with tab_custom:
+        st.markdown("Free Play")
+        st.write("好きな都市を手動で設定してプレイできます。")
+        
         # ---- START CITY ----
         st.write("**Start City**")
         with st.container(border=True):
-            start_query = st.text_input(
-                "Start City", placeholder="例：Tokyo / 東京", key="start_query",
-                label_visibility="collapsed",
-            )
+            start_query = st.text_input("Start City", placeholder="例：Tokyo / 東京", key="start_query", label_visibility="collapsed")
             if start_query.strip():
                 start_candidates = search_city_candidates(cities, search_index, start_query, fuzzy=True)
                 if start_candidates:
-                    st.session_state.start_candidates = start_candidates
                     st.caption("📍 もしかして")
-                    
-                    # インデックスではなく geonameid をキーにして選択状態を確実にリセット
                     start_options = {item["city"]["geonameid"]: item for item in start_candidates}
-                    
                     start_selected_id = st.selectbox(
                         "START CITYを選択", 
                         options=list(start_options.keys()),
                         format_func=lambda x: city_display_name(start_options[x]["city"]), 
-                        key="start_selection",
-                        label_visibility="collapsed",
+                        key="start_selection", label_visibility="collapsed"
                     )
                     st.session_state.start_selected = start_options[start_selected_id]["city"]
                 else:
@@ -331,25 +488,17 @@ if not st.session_state.game_started:
         # ---- GOAL CITY ----
         st.write("**Goal City**")
         with st.container(border=True):
-            goal_query = st.text_input(
-                "Goal City", placeholder="例：Osaka / 大阪", key="goal_query",
-                label_visibility="collapsed",
-            )
+            goal_query = st.text_input("Goal City", placeholder="例：Osaka / 大阪", key="goal_query", label_visibility="collapsed")
             if goal_query.strip():
                 goal_candidates = search_city_candidates(cities, search_index, goal_query, fuzzy=True)
                 if goal_candidates:
-                    st.session_state.goal_candidates = goal_candidates
                     st.caption("📍 もしかして")
-                    
-                    # こちらも geonameid ベースに修正
                     goal_options = {item["city"]["geonameid"]: item for item in goal_candidates}
-                    
                     goal_selected_id = st.selectbox(
                         "GOAL CITYを選択", 
                         options=list(goal_options.keys()),
                         format_func=lambda x: city_display_name(goal_options[x]["city"]), 
-                        key="goal_selection",
-                        label_visibility="collapsed",
+                        key="goal_selection", label_visibility="collapsed"
                     )
                     st.session_state.goal_selected = goal_options[goal_selected_id]["city"]
                 else:
@@ -359,45 +508,38 @@ if not st.session_state.game_started:
                 st.session_state.goal_selected = None
 
         st.write("")
-        max_distance = st.number_input("最大移動距離 MAX DISTANCE (km)", min_value=1.0, max_value=5000.0, value=100.0, step=10.0)
+        max_distance_custom = st.number_input("最大移動距離 MAX DISTANCE (km)", min_value=1.0, max_value=5000.0, value=100.0, step=10.0)
         st.write("")
 
-        ready_to_start = (
-            st.session_state.start_selected is not None
-            and st.session_state.goal_selected is not None
-        )
+        ready_to_start = (st.session_state.start_selected is not None and st.session_state.goal_selected is not None)
 
-        if st.button("START", use_container_width=True, type="primary", disabled=not ready_to_start):
+        if st.button("START", use_container_width=True, type="primary", disabled=not ready_to_start, key="btn_custom_start"):
             start_city = st.session_state.start_selected
             goal_city = st.session_state.goal_selected
 
             if start_city["geonameid"] == goal_city["geonameid"]:
                 st.error("STARTとGOALは別の都市にしてください。")
-                st.stop()
+            else:
+                st.session_state.game_started = True
+                st.session_state.game_finished = False
+                st.session_state.game_result = None
+                st.session_state.start_city = start_city
+                st.session_state.goal_city = goal_city
+                st.session_state.current_city = start_city
+                st.session_state.visited_cities = [start_city]
+                st.session_state.total_distance = 0.0
+                st.session_state.max_distance = float(max_distance_custom)
+                st.session_state.last_move_distance = None
+                st.rerun()
 
-            st.session_state.game_started = True
-            st.session_state.game_finished = False
-            st.session_state.game_result = None
-            st.session_state.start_city = start_city
-            st.session_state.goal_city = goal_city
-            st.session_state.current_city = start_city
-            st.session_state.visited_cities = [start_city]
-            st.session_state.total_distance = 0.0
-            st.session_state.max_distance = float(max_distance)
-            st.session_state.last_move_distance = None
-            st.rerun()
-
-        if not ready_to_start:
-            st.caption("STARTとGOALを入力すると、該当する都市の候補が表示されます。両方選択するとSTARTボタンが有効になります。")
 
     # -------------------------------
-    # 右半分：チュートリアルルート ＆ 画像
+    # タブ3：Tutorial（サブ）
     # -------------------------------
-    with setup_right:
-        st.markdown('<div class="section-label">TUTORIAL ROUTES</div>', unsafe_allow_html=True)
-        st.caption("クリックですぐにゲームを開始できるおすすめルートです。")
+    with tab_tutorial:
+        st.markdown("Turorial")
+        st.write("クリックですぐにゲームを開始できるおすすめルートです。")
         
-        # チュートリアル用のルート定義
         TUTORIAL_ROUTES = [
             {"title": "🔰 短距離", "desc": "東京 - 大阪", "start": "Tokyo", "goal": "Osaka", "max_distance": 100.0},
             {"title": "✈️ 中距離", "desc": "ロンドン - イスタンブル", "start": "London", "goal": "Istanbul", "max_distance": 600.0},
@@ -405,10 +547,8 @@ if not st.session_state.game_started:
             {"title": "🚀 超長距離", "desc": "東京 - ロンドン", "start": "Tokyo", "goal": "London", "max_distance": 3000.0},
         ]
         
-        # 2x2のグリッドで配置
         for i in range(0, len(TUTORIAL_ROUTES), 2):
             c1, c2 = st.columns(2)
-            # 左側の列
             with c1:
                 route = TUTORIAL_ROUTES[i]
                 with st.container(border=True):
@@ -418,7 +558,6 @@ if not st.session_state.game_started:
                     if st.button("選択", key=f"tut_{i}", use_container_width=True):
                         confirm_tutorial(route)
             
-            # 右側の列
             with c2:
                 if i + 1 < len(TUTORIAL_ROUTES):
                     route = TUTORIAL_ROUTES[i+1]
@@ -429,19 +568,10 @@ if not st.session_state.game_started:
                         if st.button("選択", key=f"tut_{i+1}", use_container_width=True):
                             confirm_tutorial(route)
 
-        st.write("")
-        
-        # ヒーロー画像（邪魔にならないよう少し小さめにして下部に配置）
-        from pathlib import Path
-        img_path = Path(__file__).parent / "hero-image.jpeg"
-        if img_path.exists():
-            pad_left, img_col, pad_right = st.columns([0.15, 0.7, 0.15])
-            with img_col:
-                st.image(str(img_path), use_container_width=True)
-
     st.divider()
     st.caption(f"都市データ：{len(cities):,} cities")
     st.stop()
+
 
 # =========================================================
 # GAME VARIABLES
@@ -490,13 +620,13 @@ if st.session_state.game_finished:
 
     with r_left:
         if result == "CLEAR":
-            st.markdown("### 📊 Result")
+            st.markdown("Result")
             
-            st.markdown('<div class="section-label">GAME MODE</div>', unsafe_allow_html=True)
-            st.markdown(
-                f'<div class="mode-value" style="margin-bottom: 1.5rem;">{st.session_state.game_mode}</div>',
-                unsafe_allow_html=True,
-            )
+            #st.markdown('<div class="section-label">GAME MODE</div>', unsafe_allow_html=True)
+            # st.markdown(
+            #     f'<div class="mode-value" style="margin-bottom: 1.5rem;">{st.session_state.game_mode}</div>',
+            #     unsafe_allow_html=True,
+            # )
 
             # ランク判定
             if route_efficiency >= 95.0:
@@ -561,7 +691,7 @@ if st.session_state.game_finished:
                     st.rerun()
 
     with r_right:
-        game_map = create_map(visited_cities, start_city, goal_city, current_city)
+        game_map = create_map(visited_cities, start_city, goal_city, current_city, max_distance)
         st_folium(game_map, width=None, height=420, returned_objects=[])
         st.write("")
         st.markdown('<div class="section-label">ROUTE HISTORY</div>', unsafe_allow_html=True)
@@ -591,10 +721,21 @@ with left:
 
     st.write("")
 
-    # ---- WHERE TO NEXT ----
+    ## ---- WHERE TO NEXT ----
     st.markdown('<div class="section-label">WHERE TO NEXT?</div>', unsafe_allow_html=True)
-    st.caption(f"最大 {max_distance:.0f} km 以内の都市へ移動できます。")
-    next_query = st.text_input("次の都市", placeholder="例：Yokohama / 横浜", label_visibility="collapsed", key="next_city_input")
+    
+    # 距離に応じてGoogle Mapsのズームレベルを最適化（距離が大きいほど広域を表示）
+    zoom_level = max(3, int(14 - math.log2(max_distance)))
+    gmaps_url = f"https://www.google.com/maps/@{current_city['latitude']},{current_city['longitude']},{zoom_level}z"
+
+    # キャプションとヒントボタンを横並びに配置
+    col_cap, col_hint = st.columns([7, 3], vertical_alignment="bottom")
+    with col_cap:
+        st.caption(f"最大 {max_distance:.0f} km 以内の都市へ移動できます。")
+    with col_hint:
+        st.link_button("周辺を調べる", gmaps_url, use_container_width=True, help="Google Mapsを開いてヒントを探します")
+
+    next_query = st.text_input("次の都市", placeholder="例：Yokohama / よこはま / 横浜", label_visibility="collapsed", key="next_city_input")
 
     if next_query.strip():
         exact_candidates = search_city_candidates(
@@ -718,5 +859,5 @@ with right:
     st.write("")
 
     # ---- MAP ----
-    game_map = create_map(visited_cities, start_city, goal_city, current_city)
+    game_map = create_map(visited_cities, start_city, goal_city, current_city, max_distance)
     st_folium(game_map, width=None, height=560, returned_objects=[])
